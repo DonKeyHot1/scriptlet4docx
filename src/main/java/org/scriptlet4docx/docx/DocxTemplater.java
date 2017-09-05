@@ -1,9 +1,5 @@
 package org.scriptlet4docx.docx;
 
-import groovy.text.GStringTemplateEngine;
-import groovy.text.TemplateEngine;
-import groovy.util.AntBuilder;
-
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -14,6 +10,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -30,11 +27,66 @@ import org.scriptlet4docx.docx.TemplateContent.ContentItem;
 import org.scriptlet4docx.util.string.StringUtil;
 import org.scriptlet4docx.util.xml.XMLUtils;
 
-public class DocxTemplater {
+import groovy.text.GStringTemplateEngine;
+import groovy.text.Template;
+import groovy.text.TemplateEngine;
+import groovy.util.AntBuilder;
+
+public class DocxTemplater
+{
+
+    private static Pattern scriptPattern = Pattern.compile("((&lt;%=?(.*?)%&gt;)|\\$\\{(.*?)\\})",
+            Pattern.DOTALL | Pattern.MULTILINE);
+
+    private static String NEW_LINE_PLACEHOLDER = "26f679ad-e7fd-4d42-9e05-946f393c277d";
+    static String CLASS_NAME = DocxTemplater.class.getCanonicalName();
+    static Logger logger = Logger.getLogger(CLASS_NAME);
+    final static String UTIL_FUNC_HOLDER = "__docxTemplaterInstance";
+
+    final static String NULL_REPLACER_REF = UTIL_FUNC_HOLDER + ".replaceIfNull";
+
+    /**
+     * Cleans up templater temporary folder.<br/>
+     * Normally should be called when application is about to end its execution.
+     */
+    public static void cleanup()
+    {
+        try
+        {
+            TemplateFileManager.getInstance().cleanup();
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e);
+        }
+    }
+
+    protected static Map<String, Object> processParams(Map<String, Object> params)
+    {
+        Map<String, Object> res = new HashMap<String, Object>();
+        for (Map.Entry<String, Object> e : params.entrySet())
+        {
+            Object v = e.getValue();
+            if (v instanceof String)
+            {
+                String sv = (String)v;
+                sv = sv.replace("\r\n", "\n");
+                sv = sv.replace("\n", NEW_LINE_PLACEHOLDER);
+                v = sv;
+            }
+            res.put(e.getKey(), v);
+        }
+        return res;
+    }
+
+    private final ConcurrentHashMap<String, Template> templateCache = new ConcurrentHashMap<>();
 
     private File pathToDocx;
+
     private InputStream templateStream;
+
     private String streamTemplateKey;
+
     private TemplateEngine templateEngine;
 
     /**
@@ -44,6 +96,8 @@ public class DocxTemplater {
     {
         setTemplateEngine(new GStringTemplateEngine());
     }
+
+    private String nullReplacement = "";
 
     /**
      * Reads template content from file on file system.<br/>
@@ -56,7 +110,8 @@ public class DocxTemplater {
      *            path to docx template. Would be read only once with first
      *            process invocation.
      */
-    public DocxTemplater(File pathToDocx) {
+    public DocxTemplater(File pathToDocx)
+    {
         this.pathToDocx = pathToDocx;
     }
 
@@ -74,60 +129,142 @@ public class DocxTemplater {
      *            contain special characters like '/' and be too long. This
      *            parameter is used for file system file path.
      */
-    public DocxTemplater(InputStream inputStream, String templateKey) {
+    public DocxTemplater(InputStream inputStream, String templateKey)
+    {
         this.templateStream = inputStream;
         this.streamTemplateKey = templateKey;
     }
 
-    private static Pattern scriptPattern = Pattern.compile("((&lt;%=?(.*?)%&gt;)|\\$\\{(.*?)\\})", Pattern.DOTALL
-            | Pattern.MULTILINE);
-
-    protected TemplateContent cleanupTemplate(TemplateContent content) {
-        List<ContentItem> items = new ArrayList<TemplateContent.ContentItem>();
-
-        for (int i = 0; i < content.getItems().size(); i++) {
-            items.add(new ContentItem(content.getItems().get(i).getIdentifier(), cleanupTemplate(content.getItems()
-                    .get(i).getContent())));
-        }
-        return new TemplateContent(items);
+    /**
+     * Returns current Template Engine
+     * 
+     * @return TemplateEngine implementation
+     */
+    public TemplateEngine getTemplateEngine()
+    {
+        return templateEngine;
     }
 
-    protected String cleanupTemplate(String template) {
+    /**
+     * Process template with the given params and save result as a docx file.
+     */
+    public void process(File destDocx, Map<String, Object> params)
+    {
+        try
+        {
+            String templateKey = setupTemplate();
+
+            TemplateContent tCont = TemplateFileManager.getInstance().getTemplateContent(templateKey);
+
+            if (!TemplateFileManager.getInstance().isPreProcessedTemplateExists(templateKey))
+            {
+                tCont = cleanupTemplate(tCont);
+                TemplateFileManager.getInstance().savePreProcessed(templateKey, tCont);
+            }
+
+            tCont = processCleanedTemplate(tCont, params);
+            processResult(destDocx, templateKey, tCont);
+        }
+        catch (RuntimeException e)
+        {
+            throw e;
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Process template with the given params and writes result as output
+     * stream.<br/>
+     * Note that stream will be closed automatically.
+     */
+    public void process(OutputStream outputStream, Map<String, Object> params)
+    {
+        try
+        {
+            InputStream inputStream = null;
+            try
+            {
+                inputStream = processAndReturnInputStream(params);
+                IOUtils.copy(inputStream, outputStream);
+            }
+            finally
+            {
+                IOUtils.closeQuietly(inputStream);
+                IOUtils.closeQuietly(outputStream);
+            }
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Process template with the given params and return output stream as
+     * result.
+     */
+    public InputStream processAndReturnInputStream(Map<String, Object> params)
+    {
+        File tmpResFile = TemplateFileManager.getInstance().getUniqueOutStreamFile();
+        process(tmpResFile, params);
+        try
+        {
+            return new DeleteOnCloseFileInputStream(tmpResFile);
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * 
+     * @param nullReplacement
+     *            When scriptlet output is null this value take its place.<br />
+     *            Useful when you want nothing to be printed, or custom value
+     *            like "UNKNOWN".
+     */
+    public void setNullReplacement(String nullReplacement)
+    {
+        this.nullReplacement = nullReplacement;
+    }
+
+    /**
+     * When a different Template Engine other than GStringTemplateEngine is
+     * required.
+     * 
+     * @param templateEngine
+     */
+    public void setTemplateEngine(TemplateEngine templateEngine)
+    {
+        this.templateEngine = templateEngine;
+    }
+
+    protected String cleanupTemplate(String template)
+    {
         template = DividedScriptWrapsProcessor.process(template);
         template = TableScriptingProcessor.process(template);
         return template;
     }
 
-    protected TemplateContent processCleanedTemplate(TemplateContent content, Map<String, Object> params)
-            throws CompilationFailedException, ClassNotFoundException, IOException {
+    protected TemplateContent cleanupTemplate(TemplateContent content)
+    {
         List<ContentItem> items = new ArrayList<TemplateContent.ContentItem>();
 
-        for (int i = 0; i < content.getItems().size(); i++) {
-            items.add(new ContentItem(content.getItems().get(i).getIdentifier(), processCleanedTemplate(content
-                    .getItems().get(i).getContent(), params)));
+        for (int i = 0; i < content.getItems().size(); i++)
+        {
+            items.add(new ContentItem(content.getItems().get(i).getIdentifier(),
+                    cleanupTemplate(content.getItems().get(i).getContent())));
         }
         return new TemplateContent(items);
     }
 
-    private static String NEW_LINE_PLACEHOLDER = "26f679ad-e7fd-4d42-9e05-946f393c277d";
-
-    protected static Map<String, Object> processParams(Map<String, Object> params) {
-        Map<String, Object> res = new HashMap<String, Object>();
-        for (Map.Entry<String, Object> e : params.entrySet()) {
-            Object v = e.getValue();
-            if (v instanceof String) {
-                String sv = (String) v;
-                sv = sv.replace("\r\n", "\n");
-                sv = sv.replace("\n", NEW_LINE_PLACEHOLDER);
-                v = sv;
-            }
-            res.put(e.getKey(), v);
-        }
-        return res;
-    }
-
     protected String processCleanedTemplate(String template, Map<String, Object> params)
-            throws CompilationFailedException, ClassNotFoundException, IOException {
+            throws CompilationFailedException, ClassNotFoundException, IOException
+    {
         final String methodName = "processScriptedTemplate";
 
         params = processParams(params);
@@ -138,13 +275,17 @@ public class DocxTemplater {
 
         Matcher m = scriptPattern.matcher(template);
 
-        while (m.find()) {
+        while (m.find())
+        {
             String scriptText = m.group(0);
             Placeholder ph = new Placeholder(UUID.randomUUID().toString(), scriptText, PlaceholderType.SCRIPT);
 
-            if (ph.scriptWrap == ScriptWraps.DOLLAR_PRINT) {
+            if (ph.scriptWrap == ScriptWraps.DOLLAR_PRINT)
+            {
                 ph.setScriptTextNoWrap(m.group(4));
-            } else if (ph.scriptWrap == ScriptWraps.SCRIPLET || ph.scriptWrap == ScriptWraps.SCRIPLET_PRINT) {
+            }
+            else if (ph.scriptWrap == ScriptWraps.SCRIPLET || ph.scriptWrap == ScriptWraps.SCRIPLET_PRINT)
+            {
                 ph.setScriptTextNoWrap(m.group(3));
             }
 
@@ -153,22 +294,27 @@ public class DocxTemplater {
 
         String replacedScriptsTemplate = m.replaceAll(replacement);
 
-        List<String> pieces = Arrays.asList(StringUtils.splitByWholeSeparatorPreserveAllTokens(replacedScriptsTemplate,
-                replacement));
+        List<String> pieces = Arrays
+                .asList(StringUtils.splitByWholeSeparatorPreserveAllTokens(replacedScriptsTemplate, replacement));
 
-        if (pieces.size() != scripts.size() + 1) {
-            throw new IllegalStateException(String.format(
-                    "Programming bug was detected. Text pieces size does not match scripts size (%s, %s)."
-                            + " Please report this as a bug to the library author.", pieces.size(), scripts.size()));
+        if (pieces.size() != scripts.size() + 1)
+        {
+            throw new IllegalStateException(
+                    String.format(
+                            "Programming bug was detected. Text pieces size does not match scripts size (%s, %s)."
+                                    + " Please report this as a bug to the library author.",
+                            pieces.size(), scripts.size()));
         }
 
         List<Placeholder> tplSkeleton = new ArrayList<Placeholder>();
 
         int i = 0;
-        for (String piece : pieces) {
+        for (String piece : pieces)
+        {
             tplSkeleton.add(new Placeholder(UUID.randomUUID().toString(), piece, PlaceholderType.TEXT));
 
-            if (i < scripts.size()) {
+            if (i < scripts.size())
+            {
                 tplSkeleton.add(scripts.get(i));
             }
             i++;
@@ -176,28 +322,35 @@ public class DocxTemplater {
 
         StringBuilder builder = new StringBuilder();
 
-        for (Placeholder placeholder : tplSkeleton) {
-            if (PlaceholderType.SCRIPT == placeholder.type) {
+        for (Placeholder placeholder : tplSkeleton)
+        {
+            if (PlaceholderType.SCRIPT == placeholder.type)
+            {
                 String cleanScriptNoWrap = XMLUtils.getNoTagsTrimText(placeholder.getScriptTextNoWrap());
-                cleanScriptNoWrap = StringUtils.replaceEach(cleanScriptNoWrap, new String[] { "&amp;", "&gt;", "&lt;",
-                        "&quot;", "«", "»", "“", "”", "‘", "’" }, new String[] { "&", ">", "<", "\"", "\"", "\"", "\"",
-                        "\"", "\"", "\"" });
+                cleanScriptNoWrap = StringUtils.replaceEach(cleanScriptNoWrap,
+                        new String[] { "&amp;", "&gt;", "&lt;", "&quot;", "«", "»", "“", "”", "‘", "’" },
+                        new String[] { "&", ">", "<", "\"", "\"", "\"", "\"", "\"", "\"", "\"" });
 
                 cleanScriptNoWrap = cleanScriptNoWrap.trim();
                 // Replacing missing replacements, at least on top level
-                if (cleanScriptNoWrap.matches("\\w+")) {
-                    if (!params.containsKey(cleanScriptNoWrap)) {
+                if (cleanScriptNoWrap.matches("\\w+"))
+                {
+                    if (!params.containsKey(cleanScriptNoWrap))
+                    {
                         params.put(cleanScriptNoWrap, null);
                     }
                 }
 
                 if (placeholder.scriptWrap == ScriptWraps.DOLLAR_PRINT
-                        || placeholder.scriptWrap == ScriptWraps.SCRIPLET_PRINT) {
+                        || placeholder.scriptWrap == ScriptWraps.SCRIPLET_PRINT)
+                {
                     cleanScriptNoWrap = NULL_REPLACER_REF + "(" + cleanScriptNoWrap + ")";
                 }
                 String script = placeholder.constructWithCurrentScriptWrap(cleanScriptNoWrap);
                 builder.append(script);
-            } else {
+            }
+            else
+            {
                 builder.append(placeholder.ph);
             }
         }
@@ -206,16 +359,20 @@ public class DocxTemplater {
 
         params.put(UTIL_FUNC_HOLDER, this);
 
-        if (logger.isLoggable(Level.FINEST)) {
+        if (logger.isLoggable(Level.FINEST))
+        {
             logger.logp(Level.FINEST, CLASS_NAME, methodName, String.format("\ntemplate = \n%s\n", template));
         }
 
         String scriptAppliedStr;
-        try {
-            scriptAppliedStr = String.valueOf(templateEngine.createTemplate(template).make(params));
-        } catch (Throwable e) {
-            logger.logp(Level.SEVERE, CLASS_NAME, methodName,
-                    String.format("Cannot process template: [%s].", template), e);
+        try
+        {
+            scriptAppliedStr = String.valueOf(getTemplate(template).make(params));
+        }
+        catch (Throwable e)
+        {
+            logger.logp(Level.SEVERE, CLASS_NAME, methodName, String.format("Cannot process template: [%s].", template),
+                    e);
             throw new RuntimeException(e);
         }
 
@@ -224,8 +381,10 @@ public class DocxTemplater {
         scriptAppliedStr = StringUtils.replace(scriptAppliedStr, NEW_LINE_PLACEHOLDER, "<w:br/>");
 
         String result = scriptAppliedStr;
-        for (Placeholder placeholder : tplSkeleton) {
-            if (PlaceholderType.TEXT == placeholder.type) {
+        for (Placeholder placeholder : tplSkeleton)
+        {
+            if (PlaceholderType.TEXT == placeholder.type)
+            {
                 result = StringUtils.replace(result, placeholder.ph, placeholder.text);
             }
         }
@@ -233,103 +392,31 @@ public class DocxTemplater {
         return result;
     }
 
-    static String CLASS_NAME = DocxTemplater.class.getCanonicalName();
-    static Logger logger = Logger.getLogger(CLASS_NAME);
+    protected TemplateContent processCleanedTemplate(TemplateContent content, Map<String, Object> params)
+            throws CompilationFailedException, ClassNotFoundException, IOException
+    {
+        List<ContentItem> items = new ArrayList<TemplateContent.ContentItem>();
 
-    protected String setupTemplate() throws IOException {
-        String templateKey = null;
-        if (pathToDocx != null) {
-            // this is file-base usage
-            // TODO what if hash collision? A longer hash algorithm may be
-            // needed.
-            templateKey = pathToDocx.hashCode() + "-" + FilenameUtils.getBaseName(pathToDocx.getName());
-            if (!TemplateFileManager.getInstance().isPrepared(templateKey)) {
-                TemplateFileManager.getInstance().prepare(pathToDocx, templateKey);
-            }
-        } else {
-            // this is stream-based usage
-            try {
-                templateKey = streamTemplateKey;
-                if (!TemplateFileManager.getInstance().isTemplateFileFromStreamExists(templateKey)) {
-                    TemplateFileManager.getInstance().saveTemplateFileFromStream(templateKey, templateStream);
-                    TemplateFileManager.getInstance().prepare(
-                            TemplateFileManager.getInstance().getTemplateFileFromStream(templateKey), templateKey);
-                }
-            } finally {
-                IOUtils.closeQuietly(templateStream);
-            }
-
+        for (int i = 0; i < content.getItems().size(); i++)
+        {
+            items.add(new ContentItem(content.getItems().get(i).getIdentifier(),
+                    processCleanedTemplate(content.getItems().get(i).getContent(), params)));
         }
-        return templateKey;
+        return new TemplateContent(items);
     }
 
-    /**
-     * Process template with the given params and return output stream as
-     * result.
-     */
-    public InputStream processAndReturnInputStream(Map<String, Object> params) {
-        File tmpResFile = TemplateFileManager.getInstance().getUniqueOutStreamFile();
-        process(tmpResFile, params);
-        try {
-            return new DeleteOnCloseFileInputStream(tmpResFile);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    /**
-     * Process template with the given params and writes result as output
-     * stream.<br/>
-     * Note that stream will be closed automatically.
-     */
-    public void process(OutputStream outputStream, Map<String, Object> params) {
-        try {
-            InputStream inputStream = null;
-            try {
-                inputStream = processAndReturnInputStream(params);
-                IOUtils.copy(inputStream, outputStream);
-            } finally {
-                IOUtils.closeQuietly(inputStream);
-                IOUtils.closeQuietly(outputStream);
-            }
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    /**
-     * Process template with the given params and save result as a docx file.
-     */
-    public void process(File destDocx, Map<String, Object> params) {
-        try {
-            String templateKey = setupTemplate();
-
-            TemplateContent tCont = TemplateFileManager.getInstance().getTemplateContent(templateKey);
-
-            if (!TemplateFileManager.getInstance().isPreProcessedTemplateExists(templateKey)) {
-                tCont = cleanupTemplate(tCont);
-                TemplateFileManager.getInstance().savePreProcessed(templateKey, tCont);
-            }
-
-            tCont = processCleanedTemplate(tCont, params);
-            processResult(destDocx, templateKey, tCont);
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    protected void processResult(File destDocx, String templateKey, TemplateContent content) throws IOException {
+    protected void processResult(File destDocx, String templateKey, TemplateContent content) throws IOException
+    {
         File tmpProcessFolder = TemplateFileManager.getInstance().createTmpProcessFolder();
 
         destDocx.delete();
         FileUtils.deleteDirectory(tmpProcessFolder);
 
-        FileUtils
-                .copyDirectory(TemplateFileManager.getInstance().getTemplateUnzipFolder(templateKey), tmpProcessFolder);
+        FileUtils.copyDirectory(TemplateFileManager.getInstance().getTemplateUnzipFolder(templateKey),
+                tmpProcessFolder);
 
-        for (ContentItem item : content.getItems()) {
+        for (ContentItem item : content.getItems())
+        {
             FileUtils.writeStringToFile(new File(tmpProcessFolder, "word/" + item.getIdentifier()), item.getContent(),
                     "UTF-8");
         }
@@ -346,56 +433,55 @@ public class DocxTemplater {
         FileUtils.deleteDirectory(tmpProcessFolder);
     }
 
-    /**
-     * Cleans up templater temporary folder.<br/>
-     * Normally should be called when application is about to end its execution.
-     */
-    public static void cleanup() {
-        try {
-            TemplateFileManager.getInstance().cleanup();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+    protected String setupTemplate() throws IOException
+    {
+        String templateKey = null;
+        if (pathToDocx != null)
+        {
+            // this is file-base usage
+            // TODO what if hash collision? A longer hash algorithm may be
+            // needed.
+            templateKey = pathToDocx.hashCode() + "-" + FilenameUtils.getBaseName(pathToDocx.getName());
+            if (!TemplateFileManager.getInstance().isPrepared(templateKey))
+            {
+                TemplateFileManager.getInstance().prepare(pathToDocx, templateKey);
+            }
         }
+        else
+        {
+            // this is stream-based usage
+            try
+            {
+                templateKey = streamTemplateKey;
+                if (!TemplateFileManager.getInstance().isTemplateFileFromStreamExists(templateKey))
+                {
+                    TemplateFileManager.getInstance().saveTemplateFileFromStream(templateKey, templateStream);
+                    TemplateFileManager.getInstance().prepare(
+                            TemplateFileManager.getInstance().getTemplateFileFromStream(templateKey), templateKey);
+                }
+            }
+            finally
+            {
+                IOUtils.closeQuietly(templateStream);
+            }
+
+        }
+        return templateKey;
     }
 
-    final static String UTIL_FUNC_HOLDER = "__docxTemplaterInstance";
-    final static String NULL_REPLACER_REF = UTIL_FUNC_HOLDER + ".replaceIfNull";
+    private Template getTemplate(String template) throws CompilationFailedException, ClassNotFoundException, IOException
+    {
+        if (!templateCache.containsKey(template))
+        {
+            templateCache.put(template, templateEngine.createTemplate(template));
+        }
+        return templateCache.get(template);
+    }
 
     @SuppressWarnings("unused")
-    private String replaceIfNull(Object o) {
+    private String replaceIfNull(Object o)
+    {
         return o == null ? nullReplacement : String.valueOf(o);
-    }
-
-    private String nullReplacement = "";
-
-    /**
-     * 
-     * @param nullReplacement
-     *            When scriptlet output is null this value take its place.<br />
-     *            Useful when you want nothing to be printed, or custom value
-     *            like "UNKNOWN".
-     */
-    public void setNullReplacement(String nullReplacement) {
-        this.nullReplacement = nullReplacement;
-    }
-
-    /**
-     * Returns current Template Engine
-     * 
-     * @return TemplateEngine implementation
-     */
-    public TemplateEngine getTemplateEngine() {
-        return templateEngine;
-    }
-
-    /**
-     * When a different Template Engine other than GStringTemplateEngine is
-     * required.
-     * 
-     * @param templateEngine
-     */
-    public void setTemplateEngine(TemplateEngine templateEngine) {
-        this.templateEngine = templateEngine;
     }
 
 }
