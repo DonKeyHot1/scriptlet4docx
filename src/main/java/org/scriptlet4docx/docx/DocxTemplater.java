@@ -10,7 +10,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -78,8 +77,6 @@ public class DocxTemplater
         }
         return res;
     }
-
-    private final ConcurrentHashMap<String, Template> templateCache = new ConcurrentHashMap<String, Template>();
 
     private File pathToDocx;
 
@@ -471,6 +468,8 @@ public class DocxTemplater
 
     private Template getTemplate(String template) throws CompilationFailedException, ClassNotFoundException, IOException
     {
+        Map<String, Template> templateCache = TemplateFileManager.getInstance().getTemplateCache();
+
         if (!templateCache.containsKey(template))
         {
             templateCache.put(template, templateEngine.createTemplate(template));
