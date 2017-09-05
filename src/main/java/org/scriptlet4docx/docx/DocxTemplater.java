@@ -364,7 +364,7 @@ public class DocxTemplater
         String scriptAppliedStr;
         try
         {
-            scriptAppliedStr = String.valueOf(getTemplate(template).make(params));
+            scriptAppliedStr = String.valueOf(getTemplate(streamTemplateKey, template).make(params));
         }
         catch (Throwable e)
         {
@@ -466,13 +466,14 @@ public class DocxTemplater
         return templateKey;
     }
 
-    private Template getTemplate(String template) throws CompilationFailedException, ClassNotFoundException, IOException
+    private Template getTemplate(String streamTemplateKey, String template)
+            throws CompilationFailedException, ClassNotFoundException, IOException
     {
         Map<String, Template> templateCache = TemplateFileManager.getInstance().getTemplateCache();
 
-        if (!templateCache.containsKey(template))
+        if (!templateCache.containsKey(streamTemplateKey))
         {
-            templateCache.put(template, templateEngine.createTemplate(template));
+            templateCache.put(streamTemplateKey, templateEngine.createTemplate(template));
         }
         return templateCache.get(template);
     }
