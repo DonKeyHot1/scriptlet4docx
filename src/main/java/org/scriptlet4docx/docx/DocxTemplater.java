@@ -79,7 +79,7 @@ public class DocxTemplater
         return res;
     }
 
-    private final ConcurrentHashMap<String, Template> templateCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Template> templateCache = new ConcurrentHashMap<String, Template>();
 
     private File pathToDocx;
 
