@@ -475,7 +475,7 @@ public class DocxTemplater
         {
             templateCache.put(streamTemplateKey, templateEngine.createTemplate(template));
         }
-        return templateCache.get(template);
+        return templateCache.get(streamTemplateKey);
     }
 
     @SuppressWarnings("unused")
