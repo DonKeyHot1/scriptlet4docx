@@ -266,55 +266,66 @@ public class DocxTemplater
 
         params = processParams(params);
 
-        String replacement = UUID.randomUUID().toString();
+        List<Placeholder> tplSkeleton;
 
-        List<Placeholder> scripts = new ArrayList<Placeholder>();
-
-        Matcher m = scriptPattern.matcher(template);
-
-        while (m.find())
+        if (!processed())
         {
-            String scriptText = m.group(0);
-            Placeholder ph = new Placeholder(UUID.randomUUID().toString(), scriptText, PlaceholderType.SCRIPT);
+            String replacement = UUID.randomUUID().toString();
 
-            if (ph.scriptWrap == ScriptWraps.DOLLAR_PRINT)
+            List<Placeholder> scripts = new ArrayList<Placeholder>();
+
+            Matcher m = scriptPattern.matcher(template);
+
+            while (m.find())
             {
-                ph.setScriptTextNoWrap(m.group(4));
-            }
-            else if (ph.scriptWrap == ScriptWraps.SCRIPLET || ph.scriptWrap == ScriptWraps.SCRIPLET_PRINT)
-            {
-                ph.setScriptTextNoWrap(m.group(3));
+                String scriptText = m.group(0);
+                Placeholder ph = new Placeholder(UUID.randomUUID().toString(), scriptText, PlaceholderType.SCRIPT);
+
+                if (ph.scriptWrap == ScriptWraps.DOLLAR_PRINT)
+                {
+                    ph.setScriptTextNoWrap(m.group(4));
+                }
+                else if (ph.scriptWrap == ScriptWraps.SCRIPLET || ph.scriptWrap == ScriptWraps.SCRIPLET_PRINT)
+                {
+                    ph.setScriptTextNoWrap(m.group(3));
+                }
+
+                scripts.add(ph);
             }
 
-            scripts.add(ph);
+            String replacedScriptsTemplate = m.replaceAll(replacement);
+
+            List<String> pieces = Arrays
+                    .asList(StringUtils.splitByWholeSeparatorPreserveAllTokens(replacedScriptsTemplate, replacement));
+
+            if (pieces.size() != scripts.size() + 1)
+            {
+                throw new IllegalStateException(String.format(
+                        "Programming bug was detected. Text pieces size does not match scripts size (%s, %s)."
+                                + " Please report this as a bug to the library author.",
+                        pieces.size(), scripts.size()));
+            }
+
+            tplSkeleton = new ArrayList<Placeholder>();
+
+            int i = 0;
+            for (String piece : pieces)
+            {
+                tplSkeleton.add(new Placeholder(UUID.randomUUID().toString(), piece, PlaceholderType.TEXT));
+
+                if (i < scripts.size())
+                {
+                    tplSkeleton.add(scripts.get(i));
+                }
+                i++;
+            }
+
+            TemplateFileManager.getInstance().getSkeletonCache().put(streamTemplateKey, tplSkeleton);
         }
 
-        String replacedScriptsTemplate = m.replaceAll(replacement);
-
-        List<String> pieces = Arrays
-                .asList(StringUtils.splitByWholeSeparatorPreserveAllTokens(replacedScriptsTemplate, replacement));
-
-        if (pieces.size() != scripts.size() + 1)
+        else
         {
-            throw new IllegalStateException(
-                    String.format(
-                            "Programming bug was detected. Text pieces size does not match scripts size (%s, %s)."
-                                    + " Please report this as a bug to the library author.",
-                            pieces.size(), scripts.size()));
-        }
-
-        List<Placeholder> tplSkeleton = new ArrayList<Placeholder>();
-
-        int i = 0;
-        for (String piece : pieces)
-        {
-            tplSkeleton.add(new Placeholder(UUID.randomUUID().toString(), piece, PlaceholderType.TEXT));
-
-            if (i < scripts.size())
-            {
-                tplSkeleton.add(scripts.get(i));
-            }
-            i++;
+            tplSkeleton = TemplateFileManager.getInstance().getSkeletonCache().get(streamTemplateKey);
         }
 
         StringBuilder builder = new StringBuilder();
@@ -364,7 +375,7 @@ public class DocxTemplater
         String scriptAppliedStr;
         try
         {
-            scriptAppliedStr = String.valueOf(getTemplate(streamTemplateKey, template).make(params));
+            scriptAppliedStr = String.valueOf(getTemplate(template).make(params));
         }
         catch (Throwable e)
         {
@@ -385,6 +396,8 @@ public class DocxTemplater
                 result = StringUtils.replace(result, placeholder.ph, placeholder.text);
             }
         }
+
+        TemplateFileManager.getInstance().getProcessedCache().put(streamTemplateKey, true);
 
         return result;
     }
@@ -466,8 +479,7 @@ public class DocxTemplater
         return templateKey;
     }
 
-    private Template getTemplate(String streamTemplateKey, String template)
-            throws CompilationFailedException, ClassNotFoundException, IOException
+    private Template getTemplate(String template) throws CompilationFailedException, ClassNotFoundException, IOException
     {
         Map<String, Template> templateCache = TemplateFileManager.getInstance().getTemplateCache();
 
@@ -476,6 +488,16 @@ public class DocxTemplater
             templateCache.put(streamTemplateKey, templateEngine.createTemplate(template));
         }
         return templateCache.get(streamTemplateKey);
+    }
+
+    private boolean processed()
+    {
+        Map<String, Boolean> processedCache = TemplateFileManager.getInstance().getProcessedCache();
+        if (!processedCache.containsKey(streamTemplateKey))
+        {
+            return false;
+        }
+        return true;
     }
 
     @SuppressWarnings("unused")

@@ -36,6 +36,8 @@ public class TemplateFileManager
     }
 
     private final Map<String, Template> templateCache = new ConcurrentHashMap<String, Template>();
+    private final Map<String, List<Placeholder>> skeletonCache = new ConcurrentHashMap<String, List<Placeholder>>();
+    private final Map<String, Boolean> processedCache = new ConcurrentHashMap<String, Boolean>();
 
     private File templatesDir;
 
@@ -73,6 +75,16 @@ public class TemplateFileManager
     public File createTmpProcessFolder()
     {
         return new File(templatesDir, UUID.randomUUID().toString());
+    }
+
+    public Map<String, Boolean> getProcessedCache()
+    {
+        return processedCache;
+    }
+
+    public Map<String, List<Placeholder>> getSkeletonCache()
+    {
+        return skeletonCache;
     }
 
     public Map<String, Template> getTemplateCache()
