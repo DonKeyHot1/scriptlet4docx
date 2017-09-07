@@ -8,12 +8,15 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.time.FastDateFormat;
 import org.scriptlet4docx.docx.TemplateContent.ContentItem;
 
+import groovy.text.Template;
 import groovy.util.AntBuilder;
 
 public class TemplateFileManager
@@ -31,6 +34,10 @@ public class TemplateFileManager
     {
         return instance;
     }
+
+    private final Map<String, Template> templateCache = new ConcurrentHashMap<String, Template>();
+    private final Map<String, List<Placeholder>> skeletonCache = new ConcurrentHashMap<String, List<Placeholder>>();
+    private final Map<String, Boolean> processedCache = new ConcurrentHashMap<String, Boolean>();
 
     private File templatesDir;
 
@@ -68,6 +75,21 @@ public class TemplateFileManager
     public File createTmpProcessFolder()
     {
         return new File(templatesDir, UUID.randomUUID().toString());
+    }
+
+    public Map<String, Boolean> getProcessedCache()
+    {
+        return processedCache;
+    }
+
+    public Map<String, List<Placeholder>> getSkeletonCache()
+    {
+        return skeletonCache;
+    }
+
+    public Map<String, Template> getTemplateCache()
+    {
+        return templateCache;
     }
 
     public TemplateContent getTemplateContent(String templateKey) throws IOException
